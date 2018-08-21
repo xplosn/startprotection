@@ -1,16 +1,22 @@
-﻿using System;
+// Requires: ImageLibrary
+using System;
+using System.IO;
 using System.Collections.Generic;
 using Oxide.Core;
 using Oxide.Core.Plugins;
+using Oxide.Game.Rust.Cui;
+using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("StartProtection", "Norn / wazzzup", "2.0.2", ResourceId = 1342)]
+    [Info("StartProtection", "Norn / wazzzup", "2.2.0", ResourceId = 1342)]
     [Description("Give people some leeway when they first join the game.")]
     public class StartProtection : RustPlugin
     {
         [PluginReference]
         Plugin Friends;
+        [PluginReference]
+        ImageLibrary ImageLibrary;
 
         class StoredData
         {
@@ -44,14 +50,85 @@ namespace Oxide.Plugins
         StoredData storedDataEx;
         static readonly DateTime UnixEpoch = new DateTime(1970, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc);
         static readonly double MaxUnixSeconds = (DateTime.MaxValue - UnixEpoch).TotalSeconds;
+        static readonly Dictionary<ulong, string> guiInfo = new Dictionary<ulong, string>();
+        string nofight_png;
 
+
+        #region Config
+        private bool Changed = false;
+        private bool bProtectionEnabled;
+        private bool bSleeperProtection;
+        private bool bHelicopterProtection;
+        private string UIIcon;
+        private bool canLootHeli;
+        private bool canLootDrop;
+        private bool canLootFriends;
+        private bool canLootFriendDeployables;        
+        private int iTime;
+        private int iPunishment;
+        private int iInactiveDays;
+        private int iUpdateTimerInterval;
+        
+        private void LoadVariables()
+        {
+            canLootHeli = Convert.ToBoolean(GetConfig("Settings","canLootHeli", false));
+            canLootDrop = Convert.ToBoolean(GetConfig("Settings","canLootDrop", false));
+            canLootFriends = Convert.ToBoolean(GetConfig("Settings","canLootFriends", false));
+            canLootFriendDeployables = Convert.ToBoolean(GetConfig("Settings","canLootFriendDeployables", true));
+            bProtectionEnabled = Convert.ToBoolean(GetConfig("Settings","bProtectionEnabled", true));
+            bSleeperProtection = Convert.ToBoolean(GetConfig("Settings","bSleeperProtection", true));
+            bHelicopterProtection = Convert.ToBoolean(GetConfig("Settings","bHelicopterProtection", false));
+            iUpdateTimerInterval = Convert.ToInt32(GetConfig("Settings","iUpdateTimerInterval", 10));
+            iTime = Convert.ToInt32(GetConfig("Settings","iTime", 3600));
+            iPunishment = Convert.ToInt32(GetConfig("Settings","iPunishment", 300));
+            iInactiveDays = Convert.ToInt32(GetConfig("Settings", "iInactiveDays", 1));
+            UIIcon = Convert.ToString(GetConfig("Settings", "UIIcon", "https://i.imgur.com/hom6JrH.png"));
+
+            if (Changed)
+            {
+                SaveConfig();
+                Changed = false;
+            }
+        }
+
+        private object GetConfig(string menu, string datavalue, object defaultValue)
+        {
+            var data = Config[menu] as Dictionary<string, object>;
+            if (data == null)
+            {
+                data = new Dictionary<string, object>();
+                Config[menu] = data;
+                Changed = true;
+            }
+            object value;
+            if (!data.TryGetValue(datavalue, out value))
+            {
+                value = defaultValue;
+                data[datavalue] = value;
+                Changed = true;
+            }
+            return value;
+        }
+
+        void SaveData()
+        {
+            Interface.Oxide.DataFileSystem.WriteObject(this.Title, storedData);
+            Interface.Oxide.DataFileSystem.WriteObject(this.Title+"Players", storedPlayersData);
+        }
+
+        #endregion
 
         #region Commands
+
+        void Log(string msg)
+        {
+            LogToFile("log",$"[{DateTime.Now}] {msg}",this);
+        }
 
         [ChatCommand("sp")]
         private void SPCommand(BasePlayer player, string command, string[] args)
         {
-            if (Convert.ToBoolean(Config["bProtectionEnabled"]) == false && player.net.connection.authLevel != Convert.ToInt32(Config["iAuthLevel"]))
+            if (bProtectionEnabled == false && player.net.connection.authLevel <2)
             {
                 PrintToChatEx(player, GetMessage("tDisabled", player.UserIDString));
                 return;
@@ -59,14 +136,14 @@ namespace Oxide.Plugins
             if (args.Length == 0 || args.Length > 2)
             {
                 PrintToChatEx(player, "USAGE: /sp <time | end>");
-                if (player.net.connection.authLevel >= Convert.ToInt32(Config["iAuthLevel"]))
+                if (player.net.connection.authLevel >= 2)
                 {
                     PrintToChatEx(player, "<color=yellow>ADMIN: /sp <toggle | togglesleep | cleardb | me></color>");
                 }
             }
             else if (args[0] == "me")
             {
-                if (player.net.connection.authLevel >= Convert.ToInt32(Config["iAuthLevel"]))
+                if (player.net.connection.authLevel >= 2)
                 {
                     if (storedPlayersData.Players.Contains(player.userID))
                     {
@@ -76,13 +153,14 @@ namespace Oxide.Plugins
                     ProtectionInfo p = null;
                     if (storedData.Players.TryGetValue(player.userID, out p))
                     {
-                        string minutes = Convert.ToInt32(TimeSpan.FromSeconds(p.TimeLeft).TotalMinutes).ToString();
-                        Puts("Start protection enabled for " + player.displayName + " [" + player.userID.ToString() + "] - Duration: " + minutes + " minutes.");
+                        int minutes = Convert.ToInt32(TimeSpan.FromSeconds(p.TimeLeft).TotalMinutes);
+                        Log("Start protection enabled for " + player.displayName + " [" + player.userID.ToString() + "] - Duration: " + minutes + " minutes.");
                         string parsed_config = GetMessage("tFirstSpawn", player.UserIDString);
                         parsed_config = parsed_config.Replace("{minutes_left}", minutes.ToString());
                         PrintToChatEx(player, parsed_config);
+                        SPUiUser(BasePlayer.Find(player.userID.ToString()),minutes.ToString());
                     }
-                    else { Puts("Failed..."); }
+                    else { Log($"Failed for {player.userID}..."); }
 
                 }
                 else
@@ -92,7 +170,7 @@ namespace Oxide.Plugins
             }
             else if (args[0] == "cleardb")
             {
-                if (player.net.connection.authLevel >= Convert.ToInt32(Config["iAuthLevel"]))
+                if (player.net.connection.authLevel >= 2)
                 {
                     storedData.Players.Clear();
                     storedPlayersData.Players.Clear();
@@ -106,19 +184,19 @@ namespace Oxide.Plugins
             }
             else if (args[0] == "togglesleep")
             {
-                if (player.net.connection.authLevel >= Convert.ToInt32(Config["iAuthLevel"]))
+                if (player.net.connection.authLevel >= 2)
                 {
-                    if (Convert.ToBoolean(Config["bSleeperProtection"]) == true)
+                    if (bSleeperProtection == true)
                     {
                         PrintToChatEx(player, "Sleep Protection: <color=red>disabled</color>.");
-                        Puts("Start Protection sleeper protection has been disabled by " + player.displayName + " (type /sp togglesleep to enable).");
+                        Log("Start Protection sleeper protection has been disabled by " + player.displayName + " (type /sp togglesleep to enable).");
                         Config["bSleeperProtection"] = false;
                         SaveConfig();
                     }
                     else
                     {
                         PrintToChatEx(player, "Sleep Protection: <color=green>enabled</color>.");
-                        Puts("Start Protection sleeper protection has been enabled by " + player.displayName + " (type /sp togglesleep to disabled).");
+                        Log("Start Protection sleeper protection has been enabled by " + player.displayName + " (type /sp togglesleep to disabled).");
                         Config["bSleeperProtection"] = true;
                         SaveConfig();
                     }
@@ -130,9 +208,9 @@ namespace Oxide.Plugins
             }
             else if (args[0] == "toggle")
             {
-                if (player.net.connection.authLevel >= Convert.ToInt32(Config["iAuthLevel"]))
+                if (player.net.connection.authLevel >= 2)
                 {
-                    if (Convert.ToBoolean(Config["bProtectionEnabled"]) == true)
+                    if (bProtectionEnabled == true)
                     {
                         if (ProtectionTimer != null)
                         {
@@ -145,10 +223,9 @@ namespace Oxide.Plugins
                     }
                     else
                     {
-                        int seconds = Convert.ToInt32(Config["iUpdateTimerInterval"]);
-                        ProtectionTimer = timer.Repeat(seconds, 0, () => UpdateProtectedList());
+                        ProtectionTimer = timer.Repeat(iUpdateTimerInterval, 0, () => UpdateProtectedList(true));
                         PrintToChatEx(player, GetMessage("tEnabled", player.UserIDString));
-                        int minutes = Convert.ToInt32(TimeSpan.FromSeconds(Convert.ToInt32(Config["iTime"])).TotalMinutes);
+                        int minutes = Convert.ToInt32(TimeSpan.FromSeconds(iTime).TotalMinutes);
                         Puts("Start Protection has been enabled by " + player.displayName + " [Minutes: " + minutes.ToString() + "] (type /sp toggle to disable).");
                         Config["bProtectionEnabled"] = true;
                         SaveConfig();
@@ -164,11 +241,11 @@ namespace Oxide.Plugins
                 ProtectionInfo p = null;
                 if (storedData.Players.TryGetValue(player.userID, out p))
                 {
-                    PunishPlayer(player, Convert.ToInt32(Config["iTime"]) + 1, false);
+                    Log("Start protection disabled by user " + player.displayName + " [" + player.userID.ToString() + "]");
+                    PunishPlayer(player, iTime + 1, false);
                 }
                 else
                 {
-
                     PrintToChatEx(player, GetMessage("tNoProtection", player.UserIDString));
                 }
             }
@@ -198,47 +275,42 @@ namespace Oxide.Plugins
         {
             Puts("No configuration file found, generating...");
             Config.Clear();
-
-            // --- [ GENERAL ] ---
-            Config["bProtectionEnabled"] = true;
-            Config["bSleeperProtection"] = true;
-            Config["canLootFriends"] = true;
-            Config["preventLooting"] = true;
-            Config["preventRaiding"] = true;
-            Config["iTime"] = 1800;
-            Config["iPunishment"] = 300;
-            Config["bHelicopterProtection"] = false;
-            Config["iAuthLevel"] = 2;
-            Config["iInactiveDays"] = 1;
-            Config["iUpdateTimerInterval"] = 10;
-
-            // --- [ MESSAGES ] ---
-            SaveConfig();
+            LoadVariables();
         }
 
         private void OnServerInitialized()
         {
-            if (Config["bSleeperProtection"] == null) { Puts("Resetting configuration file (out of date)..."); LoadDefaultConfig(); }
-            if (Convert.ToBoolean(Config["bProtectionEnabled"]) == true)
+            if (bProtectionEnabled == true)
             {
                 RemoveOldUsers();
-                int seconds = Convert.ToInt32(Config["iUpdateTimerInterval"]);
-                ProtectionTimer = timer.Repeat(seconds, 0, () => UpdateProtectedList());
-                string minutes = Convert.ToInt32(TimeSpan.FromSeconds(Convert.ToInt32(Config["iTime"])).TotalMinutes).ToString();
+                ProtectionTimer = timer.Repeat(iUpdateTimerInterval, 0, () => UpdateProtectedList(true));
+                string minutes = Convert.ToInt32(TimeSpan.FromSeconds(iTime).TotalMinutes).ToString();
                 Puts("Start Protection has been enabled [Minutes: " + minutes + "] (type /sp toggle to disable).");
+                foreach (BasePlayer player in BasePlayer.activePlayerList)
+                {
+                    if (storedData.Players.ContainsKey(player.userID))
+                    {
+                        DestroyUi(player);
+                    }
+                }
             }
             else
             {
                 Puts("Start Protection is not enabled (type /sp toggle to enable).");
             }
+            ImageLibrary.AddImage(UIIcon, "noak47", 0);
+            LoadImage();
         }
 
-        private void Loaded()
+        private void LoadImage()
         {
-            storedData = Interface.GetMod().DataFileSystem.ReadObject<StoredData>(this.Title);
-            storedPlayersData = Interface.GetMod().DataFileSystem.ReadObject<StoredPlayersData>(this.Title+"Players");
-            LoadDefaultMessages();
-            ulong u = 0;
+            if (!ImageLibrary.IsReady() || !ImageLibrary.HasImage("noak47",0))
+            {
+                PrintWarning("Waiting for ImageLibrary to finish image processing!");
+                timer.In(10, LoadImage);
+                return;
+            }
+            nofight_png = (string)ImageLibrary.GetImage("noak47",0);
             foreach (BasePlayer player in BasePlayer.activePlayerList)
             {
                 if (!permission.UserExists(player.userID.ToString()) || !storedPlayersData.Players.Contains(player.userID))
@@ -248,12 +320,28 @@ namespace Oxide.Plugins
             }
         }
 
+        private void Loaded()
+        {
+            storedData = Interface.GetMod().DataFileSystem.ReadObject<StoredData>(this.Title);
+            storedPlayersData = Interface.GetMod().DataFileSystem.ReadObject<StoredPlayersData>(this.Title+"Players");
+            LoadVariables();
+            LoadDefaultMessages();
+            ulong u = 0;
+        }
+
         void Unload()
         {
             Puts("Saving protection database...");
             if (ProtectionTimer != null)
             {
                 ProtectionTimer.Destroy();
+            }
+            foreach (BasePlayer player in BasePlayer.activePlayerList)
+            {
+                if (storedData.Players.ContainsKey(player.userID))
+                {
+                    DestroyUi(player);
+                }
             }
             SaveData();
         }
@@ -266,9 +354,9 @@ namespace Oxide.Plugins
             ProtectionInfo p = null;
             if (storedData.Players.TryGetValue(steamid, out p))
             {
-                if (p.Multiple == false && p.TimeLeft == Convert.ToInt32(Config["iTime"]))
+                if (p.Multiple == false && p.TimeLeft == iTime)
                 {
-                    Puts("Removing " + steamid + " from protection list, cleaning up...");
+                    Log("Removing " + steamid + " from protection list, cleaning up...");
                     storedData.Players.Remove(steamid);
                     OnPlayerFirstInit(steamid,timeleft);
                 }
@@ -276,7 +364,7 @@ namespace Oxide.Plugins
             else
             {
                 var info = new ProtectionInfo();
-                if (timeleft == -1) timeleft = Convert.ToInt32(Config["iTime"]);
+                if (timeleft == -1) timeleft = iTime;
                 info.TimeLeft = timeleft;
                 info.Multiple = false;
                 info.InitTimestamp = UnixTimeStampUTC();// Timestamp
@@ -284,6 +372,13 @@ namespace Oxide.Plugins
                 storedData.Players.Add(steamid, info);
                 Interface.GetMod().DataFileSystem.WriteObject(this.Title, storedData);
             }
+        }
+        private void OnNewSave(string filename)
+        {
+            storedData.Players.Clear();
+            storedPlayersData.Players.Clear();
+            SaveData();
+            PrintWarning("Wipe detected, cleared data");
         }
 
         void OnUserApprove(Network.Connection connection)
@@ -301,38 +396,42 @@ namespace Oxide.Plugins
             ProtectionInfo p = null;
             if (storedData.Players.TryGetValue(player.userID, out p))
             {
+                int minutes = 0;
                 if (!p.Multiple)
                 {
-                    string minutes = Convert.ToInt32(TimeSpan.FromSeconds(p.TimeLeft).TotalMinutes).ToString();
-                    Puts("Start protection enabled for " + player.displayName + " [" + player.userID.ToString() + "] - Duration: " + minutes + " minutes.");
+                    minutes = Convert.ToInt32(TimeSpan.FromSeconds(p.TimeLeft).TotalMinutes);
+                    Log("Start protection enabled for " + player.displayName + " [" + player.userID.ToString() + "] - Duration: " + minutes + " minutes.");
                     string parsed_config = GetMessage("tFirstSpawn", player.UserIDString);
                     parsed_config = parsed_config.Replace("{minutes_left}", minutes.ToString());
-                    PrintToChatEx(player, parsed_config);
+                    SPUi(player, parsed_config);
                     p.Multiple = true;
                 }
                 else
                 {
-                    string minutes = Convert.ToInt32(TimeSpan.FromSeconds(p.TimeLeft).TotalMinutes).ToString();
+                    minutes = Convert.ToInt32(TimeSpan.FromSeconds(p.TimeLeft).TotalMinutes);
                     string parsed_config = GetMessage("tSpawn", player.UserIDString);
                     parsed_config = parsed_config.Replace("{minutes_left}", minutes.ToString());
                     PrintToChatEx(player, parsed_config);
                 }
+                SPUiUser(player,minutes.ToString());
             }
         }
 
         private HitInfo OnEntityTakeDamage(BaseCombatEntity entity, HitInfo hitInfo)
         {
-            if (Convert.ToBoolean(Config["bProtectionEnabled"]) == true)
+            if (bProtectionEnabled == true)
             {
                 if (entity is BasePlayer)
                 {
                     var player = entity as BasePlayer;
+                    if (player.userID<76561200000000000L || player is NPCPlayer) return null;
 
                     ProtectionInfo p = null;
                     ProtectionInfo z = null;
                     if (hitInfo.Initiator is BasePlayer)
                     {
                         var attacker = hitInfo.Initiator as BasePlayer;
+                        if (attacker.userID<76561200000000000L || attacker is NPCPlayer) return null;
                         if (storedData.Players.TryGetValue(player.userID, out p))
                         {
                             if (storedData.Players.TryGetValue(attacker.userID, out z))
@@ -344,18 +443,19 @@ namespace Oxide.Plugins
                                 else
                                 {
                                     PunishPlayer(attacker);
-                                    Puts("Punishing " + attacker.displayName.ToString() + " for attempting to pvp.");
+                                    Log("Punishing " + attacker.displayName.ToString() + " for attempting to pvp.");
                                 }
                             }
                             if (attacker.userID != player.userID)
                             {
                                 if (player.IsSleeping())
                                 {
-                                    if (Convert.ToBoolean(Config["bSleeperProtection"]) == false)
+                                    //TODO possibly bug
+                                    if (bSleeperProtection == false)
                                     {
                                         storedData.Players.Remove(player.userID);
                                         storedPlayersData.Players.Add(player.userID);
-                                        Puts("Removed " + player.displayName.ToString() + " (Sleeping) from the Start Protection list.");
+                                        Log("Removed " + player.displayName.ToString() + " (Sleeping) from the Start Protection list.");
                                         return null;
                                     }
                                 }
@@ -369,7 +469,7 @@ namespace Oxide.Plugins
                             if (storedData.Players.TryGetValue(attacker.userID, out p))
                             {
                                 PunishPlayer(attacker);
-                                Puts("Punishing " + attacker.displayName.ToString() + " for attempting to pvp.");
+                                Log("Punishing " + attacker.displayName.ToString() + " for attempting to pvp.");
                                 hitInfo.damageTypes.ScaleAll(0f);
                                 return hitInfo;
                             }
@@ -377,7 +477,7 @@ namespace Oxide.Plugins
                     }
                     else if (hitInfo.Initiator is BaseHelicopter)
                     {
-                        if (Convert.ToBoolean(Config["bHelicopterProtection"]) == true)
+                        if (bHelicopterProtection == true)
                         {
                             if (player == null) { return null; }
                             if (storedData.Players.TryGetValue(player.userID, out z))
@@ -388,7 +488,7 @@ namespace Oxide.Plugins
                         }
                     }
                 }
-                else if(Convert.ToBoolean(Config["preventRaiding"]) == true && (entity is BuildingBlock || entity is Door || (entity.PrefabName?.Contains("building") ?? false) || (entity.PrefabName?.Contains("deployable") ?? false)))
+                else if(entity is BuildingBlock || entity is Door || (entity.PrefabName?.Contains("building") ?? false) || (entity.PrefabName?.Contains("deployable") ?? false))
                 {
                     if (hitInfo.Initiator is BasePlayer && entity.OwnerID!=0 && entity.OwnerID!=(hitInfo.Initiator as BasePlayer).userID)
                     {
@@ -399,14 +499,14 @@ namespace Oxide.Plugins
                             if (storedData.Players.TryGetValue(attacker.userID, out p))
                             {
                                 PunishPlayer(attacker);
-                                Puts("Punishing " + attacker.displayName.ToString() + " for attempting to blow.");
+                                Log("Punishing " + attacker.displayName.ToString() + " for attempting to blow.");
                                 hitInfo.damageTypes.ScaleAll(0f);
                                 return hitInfo;
                             }
                         }
                     }
                 }
-                else if(Convert.ToBoolean(Config["preventRaiding"]) == true && entity is LootableCorpse)
+                else if(entity is LootableCorpse && (entity as LootableCorpse).playerSteamID > 76561200000000000L)
                 {
                     if (hitInfo.Initiator is BasePlayer)
                     {
@@ -417,7 +517,7 @@ namespace Oxide.Plugins
                             if (storedData.Players.TryGetValue(attacker.userID, out p))
                             {
                                 PunishPlayer(attacker);
-                                Puts("Punishing " + attacker.displayName.ToString() + " for attempting to corpse.");
+                                Log("Punishing " + attacker.displayName.ToString() + " for attempting to corpse.");
                                 hitInfo.damageTypes.ScaleAll(0f);
                                 return hitInfo;
                             }
@@ -429,9 +529,29 @@ namespace Oxide.Plugins
             return null;
         }
 
+        object OnItemPickup(Item item, BasePlayer player)
+        {
+            if (bProtectionEnabled == true)
+            {
+                ProtectionInfo p = null;
+                var hasProtection = storedData.Players.TryGetValue(player.userID, out p);
+                if (!hasProtection) return null;
+
+                if (item.info.category == ItemCategory.Weapon)
+                {
+                    string minutes = Convert.ToInt32(TimeSpan.FromSeconds(p.TimeLeft).TotalMinutes).ToString();
+                    string parsed_config = GetMessage("cantDo", player.UserIDString);
+                    parsed_config = parsed_config.Replace("{minutes_left}", minutes.ToString());
+                    SPUi(player,parsed_config);
+                    return false;
+                }
+            }
+            return null;
+        }
+
         void OnLootEntity(BasePlayer player, BaseEntity entity)
         {
-            if (Convert.ToBoolean(Config["bProtectionEnabled"]) == true && Convert.ToBoolean(Config["preventLooting"]) == true)
+            if (bProtectionEnabled == true)
             {
                 ProtectionInfo p = null;
                 var hasProtection = storedData.Players.TryGetValue(player.userID, out p);
@@ -440,62 +560,258 @@ namespace Oxide.Plugins
                 var corpse = entity as LootableCorpse;
                 var sleeper = entity as BasePlayer;
                 string minutes = Convert.ToInt32(TimeSpan.FromSeconds(p.TimeLeft).TotalMinutes).ToString();
-                string parsed_config = GetMessage("tSpawn", player.UserIDString);
+                string parsed_config = GetMessage("cantDo", player.UserIDString);
                 parsed_config = parsed_config.Replace("{minutes_left}", minutes.ToString());
                 
-                if (corpse != null && corpse.playerSteamID!=player.userID)
+                //can loot corpses own and bots
+                if (corpse != null && corpse.playerSteamID!=player.userID && corpse.playerSteamID> 76561200000000000L)
                 {
-                    PrintToChatEx(player, parsed_config);
+                    SPUi(player,parsed_config);
                     timer.Once(0.01f, player.EndLooting);
                 }
-                else if (sleeper != null && Convert.ToBoolean(Config["canLootFriends"]) != true && !(bool) (Friends?.CallHook("HasFriend", sleeper.userID,player.userID) ?? false))
+                //can loot friend sleeper
+                else if (sleeper != null && canLootFriends && !(bool) (Friends?.CallHook("AreFriends", sleeper.userID,player.userID) ?? false))
                 {
-                    PrintToChatEx(player, parsed_config);
+                    SPUi(player,parsed_config);
                     timer.Once(0.01f, player.EndLooting);
                 }
-                else if (entity.PrefabName.Contains("heli_crate") || (entity.PrefabName.Contains("deployable") && entity.OwnerID!=0 && entity.OwnerID!=player.userID && !(bool) (Friends?.CallHook("HasFriend", entity.OwnerID,player.userID) ?? false)))
+                //can loot self or bot dropped rust_backpack
+                else if (entity.PrefabName.Contains("item_drop"))
                 {
-                    PrintToChatEx(player, parsed_config);
+                    if ((entity as DroppedItemContainer).playerSteamID == 0)
+                    {
+                        SPUi(player,parsed_config);
+                        timer.Once(0.01f, player.EndLooting);
+                    }
+                    else if ((entity as DroppedItemContainer).playerSteamID!=player.userID && (entity as DroppedItemContainer).playerSteamID> 76561200000000000L && !(canLootFriends && (bool) (Friends?.CallHook("AreFriends", entity.OwnerID,player.userID) ?? false)))
+                    {
+                        SPUi(player,parsed_config);
+                        timer.Once(0.01f, player.EndLooting);
+                    }
+                }
+                //no loot heli or supply
+                else if (!canLootHeli && entity.PrefabName.Contains("heli_crate"))
+                {
+                    SPUi(player,parsed_config);
                     timer.Once(0.01f, player.EndLooting);
+                }
+                else if (!canLootDrop && entity.PrefabName.Contains("supply_drop"))
+                {
+                    SPUi(player,parsed_config);
+                    timer.Once(0.01f, player.EndLooting);
+                }
+                //can loot friends deployables or own
+                else if (entity.PrefabName.Contains("deployable") && entity.OwnerID!=0 && entity.OwnerID!=player.userID)
+                {
+                    if (!(canLootFriendDeployables && (bool) (Friends?.CallHook("AreFriends", entity.OwnerID,player.userID) ?? false)))
+                    {
+                        SPUi(player,parsed_config);
+                        timer.Once(0.01f, player.EndLooting);
+                    }
                 }
             }
         }
 
         #endregion
 
-        #region Helpers
+        #region UI
 
+        void DestroyUi(BasePlayer player)
+        {
+            string gui;
+            if(guiInfo.TryGetValue(player.userID, out gui)) CuiHelper.DestroyUi(player, gui);
+            guiInfo.Remove(player.userID);
+        }
+
+        private void SPUiUser(BasePlayer player, string inputText = "")
+        {
+            DestroyUi(player);
+            guiInfo[player.userID] = CuiHelper.GetGuid();
+
+            if (inputText=="")
+            {
+                ProtectionInfo p = null;
+                if (storedData.Players.TryGetValue(player.userID, out p))
+                {
+                    inputText = Convert.ToInt32(TimeSpan.FromSeconds(p.TimeLeft).TotalMinutes).ToString();
+                }
+            }
+
+            var elements = new CuiElementContainer();
+            var panel = elements.Add(new CuiPanel()
+            {
+                Image =
+                {
+                    Color = "0.75 0.75 0.75 0.0"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.245 0.025",
+                    AnchorMax = "0.290 0.095"
+                }
+            }, "Overlay", guiInfo[player.userID]);
+
+            elements.Add(new CuiElement()
+                {
+                    Name = CuiHelper.GetGuid(),
+                    Parent = panel,
+                    Components =
+                    {
+                        new CuiRawImageComponent {Png = nofight_png, Sprite = "assets/content/textures/generic/fulltransparent.tga" },
+                        new CuiRectTransformComponent {AnchorMin = "0 0", AnchorMax = "1 1" }
+                    }
+                });
+
+            elements.Add(new CuiLabel()
+            {
+                Text =
+                {
+                    Text = "NO PVP\n"+inputText+" min",
+                    FontSize = 18,
+                    Color = "1 1 1 1",
+                    Align = TextAnchor.MiddleCenter
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0 0",
+                    AnchorMax = "1 1"
+                }
+            }, panel);
+
+            elements.Add(new CuiButton
+            {
+                Button =
+                {
+                    Command = "spinfo.show",
+                    Color = "0.8 0.8 0.8 0"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0 0",
+                    AnchorMax = "1 1"
+                },
+                Text =
+                {
+                    Text = "",
+                    FontSize = 22,
+                    Align = TextAnchor.MiddleCenter
+                }
+            }, panel);
+
+            // Create the UI elements
+            CuiHelper.AddUi(player, elements);
+        }
+
+        private void SPUi(BasePlayer player, string inputText)
+        {
+            CuiHelper.DestroyUi(player,"SPUi");
+            var elements = new CuiElementContainer()
+            {
+                {
+                    new CuiPanel
+                    {
+                        Image =
+                        {
+                            Color = "0.1 0.1 0.1 0.5"
+                        },
+                        RectTransform =
+                        {
+                            AnchorMin = "0 0",
+                            AnchorMax = "1 1"
+                        },
+                        CursorEnabled = true
+                    },
+                    new CuiElement().Parent = "Overlay", "SPUi"
+                }
+            };
+           
+            elements.Add(new CuiElement
+            {
+                Parent = "SPUi",
+                Components =
+                    {
+                        new CuiTextComponent { Color = "1 1 1 1.0", Text = inputText, FontSize = 30, Align = TextAnchor.MiddleCenter},
+                        new CuiOutlineComponent { Distance = "1 1", Color = "0.0 0.0 0.0 1.0" },
+                        new CuiRectTransformComponent
+                        {
+                            AnchorMin = "0 0",
+                            AnchorMax = "1 1"
+                        }
+                    }
+            });
+            elements.Add(new CuiButton
+            {
+                Button =
+                {
+                    Close = "SPUi",
+                    Color = "0.8 0.8 0.8 0"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0 0",
+                    AnchorMax = "1 1"
+                },
+                Text =
+                {
+                    Text = "",
+                    FontSize = 22,
+                    Align = TextAnchor.MiddleCenter
+                }
+            }, "SPUi");            
+            CuiHelper.AddUi(player, elements);
+            timer.Once(5f, () =>
+            {
+                CuiHelper.DestroyUi(player,"SPUi");
+            });
+        }
+
+        #endregion
+
+        #region API
+        private object HasProtection(BasePlayer player)
+        {
+            ProtectionInfo p = null;
+            return storedData.Players.TryGetValue(player.userID, out p);
+        }
+        #endregion
+
+        #region Helpers
         private void PrintToChatEx(BasePlayer player, string result, string tcolour = "orange")
         {
             PrintToChat(player, "<color=\"" + tcolour + "\">[" + GetMessage("title", player.UserIDString) + "]</color> " + result);
         }
 
-        private void UpdateProtectedListEx(BasePlayer player)
+        private void UpdateProtectedListEx(BasePlayer player,bool init=false)
         {
             if (player != null)
             {
                 ProtectionInfo p = null;
                 if (storedData.Players.TryGetValue(player.userID, out p))
                 {
-                    if (p.TimeLeft >= 1 && p.TimeLeft <= Convert.ToInt32(Config["iTime"]))
+                    if (p.TimeLeft >= 1 && p.TimeLeft <= iTime)
                     {
-                        p.TimeLeft = p.TimeLeft - Convert.ToInt32(Config["iUpdateTimerInterval"]);
+                        p.TimeLeft = p.TimeLeft - iUpdateTimerInterval;
+                        if (init) {
+                            int minutes = Convert.ToInt32(TimeSpan.FromSeconds(p.TimeLeft).TotalMinutes);
+                            SPUiUser(player,minutes.ToString());
+                        }
                     }
                     else
                     {
                         storedData.Players.Remove(player.userID);
                         storedPlayersData.Players.Add(player.userID);
                         PrintToChatEx(player, GetMessage("tProtectionEnded", player.UserIDString));
+                        DestroyUi(player);
                     }
                 }
             }
         }
 
-        private void UpdateProtectedList()
+        private void UpdateProtectedList(bool init = false)
         {
             foreach (BasePlayer player in BasePlayer.activePlayerList)
             {
-                UpdateProtectedListEx(player);
+                UpdateProtectedListEx(player, init);
             }
         }
 
@@ -533,8 +849,8 @@ namespace Oxide.Plugins
                     else
                     {
                         DateTime compareDate = UnixTimeStampToDateTime(item.InitTimestamp);
-                        var days = (compareDate - DateTime.Now).Days;
-                        if (days >= Convert.ToDouble(Config["iInactiveDays"]))
+                        var days = (DateTime.Now - compareDate).Days;
+                        if (days >= iInactiveDays)
                         {
                             storedData.Players.Remove(steamid);
                             storedPlayersData.Players.Add(steamid);
@@ -567,26 +883,25 @@ namespace Oxide.Plugins
                 }
                 else
                 {
-                    punish = Convert.ToInt32(Config["iPunishment"]);
+                    punish = iPunishment;
                 }
-                p.TimeLeft = p.TimeLeft - punish;
+                p.TimeLeft = Math.Max(p.TimeLeft - punish,0);
                 if (p.TimeLeft <= 0) { UpdateProtectedListEx(player); }
                 if (message)
                 {
-                    string minutes = Convert.ToInt32(TimeSpan.FromSeconds(p.TimeLeft).TotalMinutes).ToString();
+                    int minutes = Convert.ToInt32(TimeSpan.FromSeconds(p.TimeLeft).TotalMinutes);
                     string punishment = Convert.ToInt32(TimeSpan.FromSeconds(punish).TotalMinutes).ToString();
                     string parsed_config = GetMessage("tPunishment", player.UserIDString);
                     parsed_config = parsed_config.Replace("{minutes_revoked}", punishment.ToString());
                     parsed_config = parsed_config.Replace("{minutes_left}", minutes.ToString());
                     PrintToChatEx(player, parsed_config);
+                    SPUi(player,parsed_config);
+                    if (minutes>0) SPUiUser(player,minutes.ToString());
+                    else {
+                        DestroyUi(player);
+                    }
                 }
             }
-        }
-
-        void SaveData()
-        {
-            Interface.Oxide.DataFileSystem.WriteObject(this.Title, storedData);
-            Interface.Oxide.DataFileSystem.WriteObject(this.Title+"Players", storedPlayersData);
         }
 
         #endregion
@@ -595,12 +910,13 @@ namespace Oxide.Plugins
 
         void LoadDefaultMessages()
         {
-            var messages = new Dictionary<string, string>
+            lang.RegisterMessages(new Dictionary<string, string>
             {
                 {"title", "StartProtection"},
-                {"tPunishment", "<color=#FF3300>You have been punished for attempting to PVP with</color> Start Protection <color=#99FF66>Enabled!</color>\n\n{minutes_revoked} minutes revoked.\n\nYou now have <color=#FF3300>{minutes_left}</color> minutes left before your Start Protection is disabled."},
-                {"tFirstSpawn", "Start protection <color=#66FF66>enabled</color> for <color=#66FF66>{minutes_left}</color> minutes, during this time you <color=#FF3300>will not be able to pvp</color> on any level.\n\nYou can check how much time you have left by typing <color=#66FF66>/sp time</color>\n\n<color=#FF3300>Do not</color> squander this time." },
-                {"tSpawn", "You have <color=#FF3300>{minutes_left}</color> minutes left before your Start Protection is disabled."},
+                {"tPunishment", "<color=red>You have been punished for attempting to PVP with Start Protection Enabled!</color>\n{minutes_revoked} minutes revoked.\nYou now have <color=#FF3300>{minutes_left}</color> minutes left before your Start Protection is disabled."},
+                {"tFirstSpawn", "Start protection enabled for {minutes_left} minutes, during this time you will not be able to pvp on any level.\nYou can check how much time you have left - /sp time\nTo turn protection off - /sp end" },
+                {"tSpawn", "You have {minutes_left} minutes left before your Start Protection is disabled."},
+                {"cantDo", "You have PVP Protection and can't loot/pickup that.\n{minutes_left} minutes left before your Start Protection is disabled."},
                 {"tProtectionEnded", "Start protection <color=#FF3300>disabled</color>, you are now on your own."},
                 {"tNoProtection", "Start protection status is currently <color=#FF3300>disabled</color>."},
                 {"tAttackAttempt","The player you are trying to attack has Start Protection enabled and <color=#FF3300>cannot</color> be damaged."},
@@ -608,8 +924,22 @@ namespace Oxide.Plugins
                 {"tEnabled", "Start Protection has been <color=#66FF66>enabled</color>, new players will now be protected upon spawning."},
                 {"tNoAuthLevel", "You <color=#FF3300>do not</color> have access to this command."},
                 {"tDBCleared", "You have <color=#FF3300>cleared</color> the Start Protection database."},
-            };
-            lang.RegisterMessages(messages, this);
+            }, this);
+            lang.RegisterMessages(new Dictionary<string, string>
+            {
+                {"title", "Защита"},
+                {"tPunishment", "<color=red>Вы наказаны за пвп с включенной защитой!</color>\n{minutes_revoked} минут отнято от защиты.\nОсталось {minutes_left} минут до конца защиты."},
+                {"tFirstSpawn", "Защита от пвп включена на {minutes_left} минут, в это время нельзя пвп.\n\nСколько времени осталось, наберите - /sp time\n\nВыключить свою защиту - /sp end" },
+                {"tSpawn", "Осталось {minutes_left} минут до конца защиты."},
+                {"cantDo", "Ты находишься под защитой от пвп и не можешь открыть/взять это.\nОсталось {minutes_left} минут до конца защиты."},
+                {"tProtectionEnded", "Защита выключена."},
+                {"tNoProtection", "Защита на данный момент <color=#FF3300>выключена</color>"},
+                {"tAttackAttempt","Игрок находится под защитой, его <color=#FF3300>нельзя</color> убить"},
+                {"tDisabled", "Защита <color=#FF3300>выключена</color> для сервера."},
+                {"tEnabled", "Защита <color=#66FF66>включена</color>, новые игроки будут защищены."},
+                {"tNoAuthLevel", "Нет доступа к этой команде"},
+                {"tDBCleared", "База защиты очищена"},
+            }, this,"ru");
         }
         string GetMessage(string key, string steamId = null) => lang.GetMessage(key, this, steamId);
 
