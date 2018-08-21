@@ -5,10 +5,12 @@ using Oxide.Core.Plugins;
 
 namespace Oxide.Plugins
 {
-    [Info("StartProtection", "Norn / wazzzup", "2.0.1", ResourceId = 1342)]
+    [Info("StartProtection", "Norn / wazzzup", "2.0.2", ResourceId = 1342)]
     [Description("Give people some leeway when they first join the game.")]
     public class StartProtection : RustPlugin
     {
+        [PluginReference]
+        Plugin Friends;
 
         class StoredData
         {
@@ -200,6 +202,9 @@ namespace Oxide.Plugins
             // --- [ GENERAL ] ---
             Config["bProtectionEnabled"] = true;
             Config["bSleeperProtection"] = true;
+            Config["canLootFriends"] = true;
+            Config["preventLooting"] = true;
+            Config["preventRaiding"] = true;
             Config["iTime"] = 1800;
             Config["iPunishment"] = 300;
             Config["bHelicopterProtection"] = false;
@@ -383,7 +388,7 @@ namespace Oxide.Plugins
                         }
                     }
                 }
-                else if(entity is BuildingBlock || entity is Door || (entity.PrefabName?.Contains("building") ?? false) || (entity.PrefabName?.Contains("deployable") ?? false))
+                else if(Convert.ToBoolean(Config["preventRaiding"]) == true && (entity is BuildingBlock || entity is Door || (entity.PrefabName?.Contains("building") ?? false) || (entity.PrefabName?.Contains("deployable") ?? false)))
                 {
                     if (hitInfo.Initiator is BasePlayer && entity.OwnerID!=0 && entity.OwnerID!=(hitInfo.Initiator as BasePlayer).userID)
                     {
@@ -401,7 +406,7 @@ namespace Oxide.Plugins
                         }
                     }
                 }
-                else if(entity is LootableCorpse)
+                else if(Convert.ToBoolean(Config["preventRaiding"]) == true && entity is LootableCorpse)
                 {
                     if (hitInfo.Initiator is BasePlayer)
                     {
@@ -426,7 +431,7 @@ namespace Oxide.Plugins
 
         void OnLootEntity(BasePlayer player, BaseEntity entity)
         {
-            if (Convert.ToBoolean(Config["bProtectionEnabled"]) == true)
+            if (Convert.ToBoolean(Config["bProtectionEnabled"]) == true && Convert.ToBoolean(Config["preventLooting"]) == true)
             {
                 ProtectionInfo p = null;
                 var hasProtection = storedData.Players.TryGetValue(player.userID, out p);
@@ -443,12 +448,12 @@ namespace Oxide.Plugins
                     PrintToChatEx(player, parsed_config);
                     timer.Once(0.01f, player.EndLooting);
                 }
-                else if (sleeper != null)
+                else if (sleeper != null && Convert.ToBoolean(Config["canLootFriends"]) != true && !(bool) (Friends?.CallHook("HasFriend", sleeper.userID,player.userID) ?? false))
                 {
                     PrintToChatEx(player, parsed_config);
                     timer.Once(0.01f, player.EndLooting);
                 }
-                else if (entity.PrefabName.Contains("heli_crate") || (entity.PrefabName.Contains("deployable") && entity.OwnerID!=0 && entity.OwnerID!=player.userID))
+                else if (entity.PrefabName.Contains("heli_crate") || (entity.PrefabName.Contains("deployable") && entity.OwnerID!=0 && entity.OwnerID!=player.userID && !(bool) (Friends?.CallHook("HasFriend", entity.OwnerID,player.userID) ?? false)))
                 {
                     PrintToChatEx(player, parsed_config);
                     timer.Once(0.01f, player.EndLooting);
