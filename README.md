@@ -63,7 +63,7 @@ Otherwise, when player turns off his protection or it ends by time, it will end 
 - `/sp end` -- End your protection
 - `/sp cleardb` -- Wipe all data
 
-## Console Commands for server/owner
+## Console Commands
 
 - `sp.assign steamID` -- assign protection for player
 - `sp.end steamID` -- manually end protection for player
