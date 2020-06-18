@@ -8,8 +8,8 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("StartProtection", "Norn / wazzzup", "2.3.1", ResourceId = 1342)]
-    [Description("Give people some leeway when they first join the game.")]
+    [Info("Start Protection", "wazzzup", "2.3.2")]
+    [Description("Protects new players when they first connect after a server wipe")]
     public class StartProtection : RustPlugin
     {
         [PluginReference]
@@ -353,7 +353,6 @@ namespace Oxide.Plugins
         protected override void LoadDefaultConfig()
         {
             Puts("No configuration file found, generating...");
-            Config.Clear();
             LoadVariables();
         }
 
@@ -435,10 +434,9 @@ namespace Oxide.Plugins
 
         private void Init()
         {
-            storedData = Interface.GetMod().DataFileSystem.ReadObject<StoredData>(this.Title);
-            storedPlayersData = Interface.GetMod().DataFileSystem.ReadObject<StoredPlayersData>(this.Title+"Players");
+            storedData = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(this.Title);
+            storedPlayersData = Interface.Oxide.DataFileSystem.ReadObject<StoredPlayersData>(this.Title+"Players");
             LoadVariables();
-            LoadDefaultMessages();
             StartSubscribe(false);
         }
 
@@ -514,7 +512,7 @@ namespace Oxide.Plugins
             }
         }
 
-        private void OnNewSave(string filename)
+        private void OnNewSave()
         {
             storedData.Players.Clear();
             storedPlayersData.Players.Clear();
@@ -522,7 +520,7 @@ namespace Oxide.Plugins
             PrintWarning("Wipe detected, cleared data");
         }
 
-        void OnPlayerInit(BasePlayer player)
+        void OnPlayerConnected(BasePlayer player)
         {
             if (!storedPlayersData.Players.Contains(player.userID))
             {
@@ -1125,7 +1123,7 @@ namespace Oxide.Plugins
 
         #region Localization
 
-        void LoadDefaultMessages()
+        protected override void LoadDefaultMessages()
         {
             lang.RegisterMessages(new Dictionary<string, string>
             {
